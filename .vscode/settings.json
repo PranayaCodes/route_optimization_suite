@@ -1,0 +1,10 @@
+{
+    "python.analysis.extraPaths": [
+        "./shared",
+        "./task1_data_structures",
+        "./task2_graph_algorithms",
+        "./task3_algorithmic_strategies",
+        "./task4_np_hard",
+        "./task5_concurrent"
+    ]
+}
