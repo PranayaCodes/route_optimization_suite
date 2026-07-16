@@ -1,118 +1,116 @@
 """
-Benchmarks Dijkstra, Prim, and Bellman-Ford on synthetic sparse and dense
-graphs, at a few different sizes, and times them for real.
+Makes the "step by step" visualizations the brief asks for - one for
+Dijkstra's shortest path (Kathmandu -> Dhangadhi, since that's basically
+one end of the country to the other) and one for Prim's MST over the
+whole network.
 
-"Sparse" here means E ~ 2V (like the actual road network - each city
-connects to about 2 others on average). "Dense" means E ~ V(V-1)/4, so
-about a quarter of all possible edges exist - enough to actually show
-the gap between Dijkstra/Prim (which do better on sparse graphs) and
-Bellman-Ford (which doesn't care either way since it just loops over
-every edge regardless of structure).
-
-This is the "big vs practical" complexity story for task 2, same idea
-as the sorted-vs-random BST thing in task 1.
+Using networkx just for the graph layout (spring_layout) - the actual
+Dijkstra/Prim logic is from dijkstra.py / prim.py, not networkx's
+built-in versions, that would defeat the point of task 2.
 """
-import random
-import time
-import csv
 import os
-import sys
+import networkx as nx
+import matplotlib.pyplot as plt
+
+from nepal_network import build_nepal_graph, CITY_NAMES, ROAD_SEGMENTS
+from dijkstra import dijkstra, reconstruct_path
+from prim import prim_mst
 
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, _THIS_DIR)
-
-from graph import Graph
-from dijkstra import dijkstra
-from prim import prim_mst
-from bellman_ford import bellman_ford
-
-random.seed(7)
+_FIGURES_DIR = os.path.join(os.path.dirname(_THIS_DIR), "figures")
 
 
-def make_random_graph(n, edge_factor, directed=True, weight_range=(1, 200)):
-    """
-    edge_factor controls how many edges get added, roughly:
-      sparse ~ 2  ->  E ~ 2n
-      dense  ~ n/4 -> E ~ n^2/4
-    """
-    g = Graph(directed=directed)
-    for i in range(n):
-        g.add_node(i)
-
-    target_edges = int(n * edge_factor)
-    added = 0
-    attempts = 0
-    max_attempts = target_edges * 20  # avoid infinite loop if graph is basically full already
-
-    # first guarantee the graph is connected (a random spanning path),
-    # then add extra random edges on top - otherwise a random sparse
-    # graph is very likely to end up with unreachable nodes
-    nodes = list(range(n))
-    random.shuffle(nodes)
-    for i in range(n - 1):
-        w = random.randint(*weight_range)
-        g.add_edge(nodes[i], nodes[i + 1], w)
-        added += 1
-
-    while added < target_edges and attempts < max_attempts:
-        u, v = random.randint(0, n - 1), random.randint(0, n - 1)
-        attempts += 1
-        if u == v:
-            continue
-        w = random.randint(*weight_range)
-        g.add_edge(u, v, w)
-        added += 1
-
-    return g
+def _make_nx_layout():
+    # build a plain networkx graph just so we can reuse its layout
+    # algorithm - positions end up consistent across all the figures
+    # below, so they're actually comparable
+    G = nx.Graph()
+    for u, v, w in ROAD_SEGMENTS:
+        G.add_edge(u, v, weight=w)
+    pos = nx.spring_layout(G, seed=7, k=0.9)
+    return G, pos
 
 
-def time_it(fn):
-    start = time.perf_counter()
-    result = fn()
-    return result, time.perf_counter() - start
+def plot_dijkstra_path(source=0, target=9):
+    g = build_nepal_graph(directed=True)
+    dist, parent, order = dijkstra(g, source)
+    path = reconstruct_path(parent, source, target)
+
+    G, pos = _make_nx_layout()
+    path_edges = set()
+    for i in range(len(path) - 1):
+        path_edges.add(frozenset((path[i], path[i + 1])))
+
+    fig, ax = plt.subplots(figsize=(9, 7))
+    all_edges = [(u, v) for u, v, w in ROAD_SEGMENTS]
+    on_path = [e for e in all_edges if frozenset(e) in path_edges]
+    off_path = [e for e in all_edges if frozenset(e) not in path_edges]
+
+    nx.draw_networkx_edges(G, pos, edgelist=off_path, ax=ax, edge_color="lightgray", width=1)
+    nx.draw_networkx_edges(G, pos, edgelist=on_path, ax=ax, edge_color="#d62728", width=3)
+
+    node_colors = []
+    for n in G.nodes():
+        if n == source:
+            node_colors.append("#2ca02c")   # start = green
+        elif n == target:
+            node_colors.append("#d62728")   # goal = red
+        elif n in path:
+            node_colors.append("#ffbb78")   # on path = orange
+        else:
+            node_colors.append("#c7c7c7")   # not touched = gray
+
+    nx.draw_networkx_nodes(G, pos, node_color=node_colors, node_size=700, ax=ax)
+    labels = {n: CITY_NAMES.get(n, n) for n in G.nodes()}
+    nx.draw_networkx_labels(G, pos, labels=labels, font_size=8, ax=ax)
+
+    edge_labels = {(u, v): w for u, v, w in ROAD_SEGMENTS}
+    nx.draw_networkx_edge_labels(G, pos, edge_labels=edge_labels, font_size=7, ax=ax)
+
+    ax.set_title(f"Dijkstra: {CITY_NAMES[source]} -> {CITY_NAMES[target]}  "
+                 f"(total {dist[target]}km, {len(path)} cities)")
+    ax.axis("off")
+    fig.tight_layout()
+    fig.savefig(os.path.join(_FIGURES_DIR, "fig_dijkstra_path.png"), dpi=150)
+    plt.close(fig)
+    print(f"Dijkstra path {CITY_NAMES[source]} -> {CITY_NAMES[target]}: "
+          f"{[CITY_NAMES.get(n, n) for n in path]}, {dist[target]}km")
 
 
-def run_benchmark(sizes=(50, 200, 800)):
-    rows = []
-    for n in sizes:
-        sparse = make_random_graph(n, edge_factor=2, directed=True)
-        dense = make_random_graph(n, edge_factor=n // 4 if n // 4 > 2 else 4, directed=True)
+def plot_prim_mst(start=0):
+    g_undirected = build_nepal_graph(directed=False)
+    mst_edges, total_weight, build_order, connected = prim_mst(g_undirected, start=start)
 
-        sparse_undirected = make_random_graph(n, edge_factor=2, directed=False)
-        dense_undirected = make_random_graph(n, edge_factor=n // 4 if n // 4 > 2 else 4, directed=False)
+    G, pos = _make_nx_layout()
+    mst_edge_set = {frozenset((u, v)) for u, v, w in mst_edges}
 
-        _, dij_sparse_t = time_it(lambda: dijkstra(sparse, 0))
-        _, dij_dense_t = time_it(lambda: dijkstra(dense, 0))
+    fig, ax = plt.subplots(figsize=(9, 7))
+    all_edges = [(u, v) for u, v, w in ROAD_SEGMENTS]
+    in_mst = [e for e in all_edges if frozenset(e) in mst_edge_set]
+    not_in_mst = [e for e in all_edges if frozenset(e) not in mst_edge_set]
 
-        _, prim_sparse_t = time_it(lambda: prim_mst(sparse_undirected, 0))
-        _, prim_dense_t = time_it(lambda: prim_mst(dense_undirected, 0))
+    nx.draw_networkx_edges(G, pos, edgelist=not_in_mst, ax=ax, edge_color="lightgray",
+                            width=1, style="dashed")
+    nx.draw_networkx_edges(G, pos, edgelist=in_mst, ax=ax, edge_color="#2ca02c", width=3)
 
-        _, bf_sparse_t = time_it(lambda: bellman_ford(sparse, 0))
-        _, bf_dense_t = time_it(lambda: bellman_ford(dense, 0))
+    nx.draw_networkx_nodes(G, pos, node_color="#9ecae1", node_size=700, ax=ax)
+    labels = {n: CITY_NAMES.get(n, n) for n in G.nodes()}
+    nx.draw_networkx_labels(G, pos, labels=labels, font_size=8, ax=ax)
 
-        rows.append({
-            "n": n,
-            "sparse_edges": sparse.num_edges(),
-            "dense_edges": dense.num_edges(),
-            "dijkstra_sparse_ms": dij_sparse_t * 1000,
-            "dijkstra_dense_ms": dij_dense_t * 1000,
-            "prim_sparse_ms": prim_sparse_t * 1000,
-            "prim_dense_ms": prim_dense_t * 1000,
-            "bellman_ford_sparse_ms": bf_sparse_t * 1000,
-            "bellman_ford_dense_ms": bf_dense_t * 1000,
-        })
-    return rows
+    edge_labels = {(u, v): w for u, v, w in ROAD_SEGMENTS}
+    nx.draw_networkx_edge_labels(G, pos, edge_labels=edge_labels, font_size=7, ax=ax)
+
+    ax.set_title(f"Prim's MST from {CITY_NAMES[start]}  "
+                 f"(total {total_weight}km, connected={connected})")
+    ax.axis("off")
+    fig.tight_layout()
+    fig.savefig(os.path.join(_FIGURES_DIR, "fig_prim_mst.png"), dpi=150)
+    plt.close(fig)
+    print(f"Prim MST total weight: {total_weight}km, "
+          f"build order: {[CITY_NAMES.get(n, n) for n in build_order]}")
 
 
 if __name__ == "__main__":
-    results = run_benchmark()
-    with open(os.path.join(_THIS_DIR, "results_task2.csv"), "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=results[0].keys())
-        writer.writeheader()
-        writer.writerows(results)
-
-    for r in results:
-        print(f"\n--- n = {r['n']} (sparse E={r['sparse_edges']}, dense E={r['dense_edges']}) ---")
-        for k, v in r.items():
-            if k not in ("n", "sparse_edges", "dense_edges"):
-                print(f"  {k}: {v:.4f}")
+    plot_dijkstra_path(source=0, target=9)   # Kathmandu -> Dhangadhi
+    plot_prim_mst(start=0)
+    print(f"Saved figures to {_FIGURES_DIR}/")
